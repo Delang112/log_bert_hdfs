@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Windows Log Anomaly Dashboard (LogBERT)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    h1 { margin-bottom: 4px; }
+    .meta { color: #666; margin-bottom: 16px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; }
+    th { background: #f6f6f6; text-align: left; }
+    tr.anom { background: #fff3f3; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+    .ok { background: #e6f7e6; color: #135c13; }
+    .bad { background: #ffe6e6; color: #8a1010; }
+    .controls { margin-bottom: 12px; }
+    input[type="number"] { width: 100px; }
+    .pager { display: flex; align-items: center; gap: 8px; margin: 8px 0 16px; }
+    .pager button { padding: 4px 8px; }
+    .pager select { padding: 2px 6px; }
+  </style>
+  <script>
+    let currentData = [];
+    let currentLineData = [];
+    let logLines = [];
+    let timer = null;
+
+    // Pagination state
+    let page = 1;
+    let pageSize = 20;
+    let linePage = 1;
+    let linePageSize = 50;
+
+    async function loadPredictions() {
+      const resp = await fetch('../output/predictions.json?ts=' + Date.now(), {cache: 'no-cache'});
+      if (!resp.ok) throw new Error('Cannot load predictions.json');
+      return await resp.json();
+    }
+
+    async function loadLinePredictions() {
+      const resp = await fetch('../output/line_predictions.json?ts=' + Date.now(), {cache: 'no-cache'});
+      if (!resp.ok) return [];
+      return await resp.json();
+    }
+
+    async function loadLogFile() {
+      const resp = await fetch('../data/windows.log?ts=' + Date.now(), {cache: 'no-cache'});
+      if (!resp.ok) return [];
+      const text = await resp.text();
+      return text.split(/\r?\n/);
+    }
+
+    function renderTable(rows, threshold) {
+      const tbody = document.querySelector('#tbl tbody');
+      const totalPages = Math.max(1, Math.ceil((rows?.length || 0) / pageSize));
+      if (page > totalPages) page = totalPages;
+      if (page < 1) page = 1;
+
+      const start = (page - 1) * pageSize;
+      const end = start + pageSize;
+      const visible = rows.slice(start, end);
+
+      tbody.innerHTML = '';
+      for (const r of visible) {
+        const tr = document.createElement('tr');
+        const isAnom = r.anomaly_score >= threshold;
+        if (isAnom) tr.classList.add('anom');
+        tr.innerHTML = `
+          <td>${r.session_index}</td>
+          <td>${r.start_line}</td>
+          <td>${r.end_line}</td>
+          <td>${r.anomaly_score.toFixed(3)}</td>
+          <td>${isAnom ? '<span class="badge bad">Anomaly</span>' : '<span class="badge ok">Normal</span>'}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+      document.querySelector('#summary').textContent = `Sessions: ${rows.length} | Anomalies: ${rows.filter(r=>r.anomaly_score >= threshold).length}`;
+      document.querySelector('#pageInfo').textContent = `Page ${page} / ${totalPages}`;
+      document.querySelector('#updated').textContent = new Date().toLocaleTimeString();
+    }
+
+    async function init() {
+      const data = await loadPredictions().catch(err => {
+        document.querySelector('#err').textContent = err.message + ' — Run the inference script first.';
+        return [];
+      });
+      const lineData = await loadLinePredictions();
+      const lines = await loadLogFile();
+      currentData = data;
+      currentLineData = lineData;
+      logLines = lines;
+      const thresholdInput = document.querySelector('#threshold');
+      const threshold = parseFloat(thresholdInput.value);
+      renderTable(currentData, threshold);
+      thresholdInput.addEventListener('input', () => {
+        const t = parseFloat(thresholdInput.value) || 0.5;
+        renderTable(currentData, t);
+        renderAnomalyLines(currentLineData, t);
+      });
+
+      // Session pager events
+      const pageSizeSel = document.querySelector('#pageSize');
+      const firstBtn = document.querySelector('#firstPage');
+      const prevBtn = document.querySelector('#prevPage');
+      const nextBtn = document.querySelector('#nextPage');
+      const lastBtn = document.querySelector('#lastPage');
+      pageSizeSel.addEventListener('change', () => {
+        pageSize = parseInt(pageSizeSel.value) || 20;
+        page = 1;
+        const t = parseFloat(thresholdInput.value) || 0.5;
+        renderTable(currentData, t);
+      });
+      firstBtn.addEventListener('click', () => { page = 1; renderTable(currentData, parseFloat(thresholdInput.value)||0.5); });
+      prevBtn.addEventListener('click', () => { page = Math.max(1, page - 1); renderTable(currentData, parseFloat(thresholdInput.value)||0.5); });
+      nextBtn.addEventListener('click', () => { page = page + 1; renderTable(currentData, parseFloat(thresholdInput.value)||0.5); });
+      lastBtn.addEventListener('click', () => {
+        const totalPages = Math.max(1, Math.ceil((currentData?.length || 0) / pageSize));
+        page = totalPages; renderTable(currentData, parseFloat(thresholdInput.value)||0.5);
+      });
+
+      // Auto-refresh every 3s
+      timer = setInterval(async () => {
+        try {
+          const [newData, newLineData] = await Promise.all([
+            loadPredictions(),
+            loadLinePredictions(),
+          ]);
+          currentData = newData;
+          currentLineData = newLineData;
+          const t = parseFloat(thresholdInput.value) || 0.5;
+          renderTable(currentData, t);
+          renderAnomalyLines(currentLineData, t);
+        } catch (e) {
+          // keep previous data
+        }
+      }, 3000);
+      renderAnomalyLines(currentLineData, threshold);
+    }
+
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+  </head>
+  <body>
+    <h1>Windows Log Anomaly Dashboard</h1>
+    <div class="meta">Model: LogBERT (inference via placeholder until model wired)</div>
+    <div id="err" style="color: #a00; margin-bottom: 8px;"></div>
+    <div class="controls">
+      <label>Threshold: <input id="threshold" type="number" step="0.01" min="0" max="1" value="0.50"/></label>
+      <span style="margin-left:12px;color:#666">Updated: <span id="updated">—</span></span>
+    </div>
+    <div class="pager">
+      <strong>Sessions:</strong>
+      <button id="firstPage">« First</button>
+      <button id="prevPage">‹ Prev</button>
+      <span id="pageInfo">Page 1 / 1</span>
+      <button id="nextPage">Next ›</button>
+      <button id="lastPage">Last »</button>
+      <span style="margin-left:12px;">Rows per page:
+        <select id="pageSize">
+          <option value="20" selected>20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+      </span>
+    </div>
+    <div id="summary" class="meta"></div>
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>Session</th>
+          <th>Start Line</th>
+          <th>End Line</th>
+          <th>Anomaly Score</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2 style="margin-top:24px;">Anomaly Lines</h2>
+    <div class="meta">Top 200 anomalous lines by score (uses current threshold)</div>
+    <table id="lineTbl">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Score</th>
+          <th>Text</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="pager">
+      <strong>Lines:</strong>
+      <button id="lineFirst">« First</button>
+      <button id="linePrev">‹ Prev</button>
+      <span id="linePageInfo">Page 1 / 1</span>
+      <button id="lineNext">Next ›</button>
+      <button id="lineLast">Last »</button>
+      <span style="margin-left:12px;">Rows per page:
+        <select id="linePageSize">
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </span>
+    </div>
+
+    <script>
+      function renderAnomalyLines(lineRows, threshold) {
+        const tbody = document.querySelector('#lineTbl tbody');
+        if (!Array.isArray(lineRows) || lineRows.length === 0) { tbody.innerHTML=''; document.querySelector('#linePageInfo').textContent = 'Page 1 / 1'; return; }
+        const enriched = lineRows.map(r => ({
+          line_number: r.line_number,
+          anomaly_score: r.anomaly_score,
+          text: (logLines[r.line_number - 1] || '').replace(/</g,'&lt;')
+        }));
+        const filtered = enriched
+          .filter(r => r.anomaly_score >= threshold)
+          .sort((a,b) => b.anomaly_score - a.anomaly_score);
+
+        const totalPages = Math.max(1, Math.ceil((filtered.length || 0) / linePageSize));
+        if (linePage > totalPages) linePage = totalPages;
+        if (linePage < 1) linePage = 1;
+        const start = (linePage - 1) * linePageSize;
+        const end = start + linePageSize;
+        const visible = filtered.slice(start, end);
+
+        tbody.innerHTML = '';
+        for (const r of visible) {
+          const tr = document.createElement('tr');
+          tr.className = 'anom';
+          tr.innerHTML = `
+            <td>${r.line_number}</td>
+            <td>${r.anomaly_score.toFixed(3)}</td>
+            <td style="font-family: Consolas, monospace; white-space: pre-wrap;">${r.text}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+        document.querySelector('#linePageInfo').textContent = `Page ${linePage} / ${totalPages}`;
+      }
+
+      // Wire up line pager events on load
+      window.addEventListener('DOMContentLoaded', () => {
+        const linePageSizeSel = document.querySelector('#linePageSize');
+        const firstBtn = document.querySelector('#lineFirst');
+        const prevBtn = document.querySelector('#linePrev');
+        const nextBtn = document.querySelector('#lineNext');
+        const lastBtn = document.querySelector('#lineLast');
+        linePageSizeSel.addEventListener('change', () => {
+          linePageSize = parseInt(linePageSizeSel.value) || 50;
+          linePage = 1;
+          const t = parseFloat(document.querySelector('#threshold').value) || 0.5;
+          renderAnomalyLines(currentLineData, t);
+        });
+        firstBtn.addEventListener('click', () => { linePage = 1; renderAnomalyLines(currentLineData, parseFloat(document.querySelector('#threshold').value)||0.5); });
+        prevBtn.addEventListener('click', () => { linePage = Math.max(1, linePage - 1); renderAnomalyLines(currentLineData, parseFloat(document.querySelector('#threshold').value)||0.5); });
+        nextBtn.addEventListener('click', () => { linePage = linePage + 1; renderAnomalyLines(currentLineData, parseFloat(document.querySelector('#threshold').value)||0.5); });
+        lastBtn.addEventListener('click', () => {
+          const t = parseFloat(document.querySelector('#threshold').value) || 0.5;
+          // Recompute total pages based on current filter length
+          const enriched = (currentLineData||[]).map(r => ({ line_number: r.line_number, anomaly_score: r.anomaly_score, text: '' }));
+          const filteredLen = enriched.filter(r => r.anomaly_score >= t).length;
+          const totalPages = Math.max(1, Math.ceil((filteredLen || 0) / linePageSize));
+          linePage = totalPages;
+          renderAnomalyLines(currentLineData, t);
+        });
+      });
+    </script>
+  </body>
+  </html>

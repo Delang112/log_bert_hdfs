@@ -1,0 +1,6 @@
+{
+  "created_at": "2025-09-05T07:15:27.458016Z",
+  "src_model_path": "output/hdfs/bert/best_bert.pth",
+  "src_vocab_path": "output/hdfs/vocab.pkl",
+  "kaggle_run_type": "Interactive"
+}
